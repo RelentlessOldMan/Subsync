@@ -26,6 +26,7 @@ Windows only (uses SendInput). Pure stdlib -- runs on your global Python.
 
 __version__ = "1.0.0"
 
+import os
 import sys
 import time
 import ctypes
@@ -171,12 +172,14 @@ ACCENT_HI = "#8adcff"  # cyan, hover
 ACCENT_TX = "#06131a"  # dark ink for text on a cyan fill
 DANGER = "#ff6b6b"    # red   -- stop / warnings
 
-# Full-screen run states. These stay bold + purely functional: the background is
-# ONLY red (count-in, elapsed<0) or green (running, elapsed>=0). Space-held shows
-# in the status TEXT, never the background -- do not flash red on hold.
+# Run states drive the rounded "state" outline (not a full-window flood, which
+# fought the theme). Re-hued to sit inside the cool dark palette: a rose for
+# "wait", a teal-green (leaning toward the cyan accent) for "go". Tuned a touch
+# bright since a thin outline needs more punch than a fill did. The state shows
+# ONLY in the outline; space-held shows in the status TEXT.
 C_IDLE = BG
-C_ARMED = "#c62828"  # red   -- pre-roll countdown (time is negative)
-C_PLAY = "#12a150"   # green -- click play NOW / running
+C_ARMED = "#d13a52"  # rose       -- pre-roll countdown (time is negative)
+C_PLAY = "#17a074"   # teal-green -- click play NOW / running
 FG = TXT
 
 
@@ -361,6 +364,71 @@ MODES = [MODE_SPACE, MODE_TYPE]
 # faster than Eminem "Rap God" peak (~30-37 chars/sec). line start stays synced.
 CHAR_DELAY = 0.025
 
+# The three transport buttons (Load SRT / GO / Stop) MUST stay one uniform size --
+# they read as a single row. Size them here, together; never tweak one alone.
+BTN_W, BTN_H, BTN_R = 100, 40, 13
+
+# Lyric line: fixed 2-line area so the window never resizes. LYRIC_WRAP is chosen
+# so the longest real lyric (~79 chars, "You Were Always Enough") fills two lines
+# with a little slack; anything longer is truncated with an ellipsis (_fit_lyric).
+LYRIC_WRAP = 344
+LYRIC_LINES = 2
+
+# Window + the "state" outline. The window background never changes color; instead
+# a rounded outline is drawn in the padding around the UI and only appears while
+# running (rose during the count-in, teal while playing). FRAME_PAD insets the UI
+# from the edges; the outline sits in that margin.
+WIN_W, WIN_H = 380, 468
+FRAME_PAD_X, FRAME_PAD_Y = 16, 14
+BORDER_INSET, BORDER_W, BORDER_R = 6, 3, 18
+
+
+def _set_app_icon(root):
+    """Give the window + taskbar a real icon (subsync.ico); silent if absent.
+
+    Tk's iconbitmap only feeds a small frame, so at high DPI the taskbar upscales
+    it and it looks fuzzy. We additionally push crisp big/small icons straight to
+    the window via Win32 WM_SETICON -- LoadImageW picks the exact-size frame from
+    the .ico (and handles its PNG frames), so no blurry upscale. Regenerate the
+    icon with `python make_icon.py`.
+    """
+    ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "subsync.ico")
+    if not os.path.exists(ico):
+        return
+    try:
+        # group under our own taskbar identity instead of python's
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "RelentlessOldMan.Subsync")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        root.iconbitmap(default=ico)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        # NOTE: restype/argtypes matter on Win64 -- HANDLE/HWND are pointers and
+        # ctypes truncates them to 32 bits without these (same class of bug as
+        # SendInput). Set them before calling.
+        user32.LoadImageW.restype = wintypes.HANDLE
+        user32.LoadImageW.argtypes = (wintypes.HINSTANCE, wintypes.LPCWSTR,
+                                      wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                                      wintypes.UINT)
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+        user32.SendMessageW.argtypes = (wintypes.HWND, wintypes.UINT,
+                                        wintypes.WPARAM, wintypes.LPARAM)
+        root.update_idletasks()
+        hwnd = user32.GetAncestor(root.winfo_id(), 2)   # GA_ROOT (real toplevel)
+        IMAGE_ICON, WM_SETICON, LR_LOADFROMFILE = 1, 0x0080, 0x0010
+        # ICON_BIG (taskbar / alt-tab) big enough to downscale crisply; ICON_SMALL
+        for which, size in ((1, 64), (0, 32)):
+            h = user32.LoadImageW(None, ico, IMAGE_ICON, size, size,
+                                  LR_LOADFROMFILE)
+            if h:
+                user32.SendMessageW(hwnd, WM_SETICON, which, h)
+    except Exception:  # noqa: BLE001
+        pass
+
 
 class App:
     def __init__(self, root, srt_path=None):
@@ -381,8 +449,9 @@ class App:
 
         root.title("Subsync")
         root.configure(bg=C_IDLE)
+        _set_app_icon(root)
         root.attributes("-topmost", True)
-        root.geometry("380x452")
+        root.geometry(f"{WIN_W}x{WIN_H}")
         root.resizable(False, False)   # also drops the maximize box
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.mode_var = tk.StringVar(value=MODE_SPACE)
@@ -395,8 +464,16 @@ class App:
         self._btn_font = tkfont.Font(family="Segoe UI", size=10, weight="bold")
         val = tkfont.Font(family="Segoe UI", size=11)
 
-        self.frame = tk.Frame(root, bg=C_IDLE)
-        self.frame.pack(fill="both", expand=True, padx=14, pady=12)
+        # A full-window canvas hosts the UI (inset by FRAME_PAD) and draws the
+        # rounded "state" outline in the surrounding margin. The window bg stays
+        # dark at all times -- only the outline color signals armed/running.
+        self.border = tk.Canvas(root, bg=C_IDLE, highlightthickness=0, bd=0)
+        self.border.pack(fill="both", expand=True)
+        self.frame = tk.Frame(self.border, bg=C_IDLE)
+        self._frame_win = self.border.create_window(
+            FRAME_PAD_X, FRAME_PAD_Y, anchor="nw", window=self.frame)
+        self._border_color = None
+        self.border.bind("<Configure>", self._on_resize)
 
         # ---- brand bar: "〰️ Subsync"  ....  version ------------------------
         top = tk.Frame(self.frame, bg=C_IDLE)
@@ -407,7 +484,7 @@ class App:
                  font=small, anchor="e").pack(side="right")
 
         self.file_lbl = tk.Label(self.frame, text="No .srt loaded",
-                                 bg=C_IDLE, fg=DIM, font=small, anchor="w")
+                                 bg=C_IDLE, fg=DIM, font=small, anchor="center")
         self.file_lbl.pack(fill="x", pady=(8, 0))
 
         self.clock = tk.Label(self.frame, text="--.--", bg=C_IDLE, fg=DIM,
@@ -418,64 +495,76 @@ class App:
                                bg=C_IDLE, fg=DIM, font=mid)
         self.status.pack(pady=(2, 0))
 
-        self.lyric = tk.Label(self.frame, text="", bg=C_IDLE, fg=TXT,
-                              font=mid, wraplength=340)
-        self.lyric.pack(pady=(6, 10))
+        # lyric: a fixed LYRIC_LINES-tall area so the window never jumps; text is
+        # pre-wrapped/truncated to fit (see _fit_lyric).
+        self._lyric_font = mid
+        self.lyric = tk.Label(self.frame, text="", bg=C_IDLE, fg=TXT, font=mid,
+                              height=LYRIC_LINES, wraplength=LYRIC_WRAP,
+                              justify="center")
+        self.lyric.pack(fill="x", pady=(4, 8))
 
         # hairline separator between the "display" and the "controls"
         self.sep = tk.Frame(self.frame, bg=LINE, height=1)
         self.sep.pack(fill="x", pady=(0, 10))
 
-        # lag lead row -- fire keys this many ms BEFORE the srt time
-        lrow = tk.Frame(self.frame, bg=C_IDLE)
-        lrow.pack(pady=(0, 0))
-        tk.Label(lrow, text="lead", bg=C_IDLE, fg=DIM,
-                 font=small, width=7, anchor="e").pack(side="left")
-        RoundButton(lrow, "−", lambda: self.bump_lead(-0.010), "normal",
+        # controls block -- lead + mode share a grid so their labels line up in
+        # one right-aligned column and their controls in one left-aligned column,
+        # and the whole block is centered (keeps the rows from looking ragged).
+        ctrl = tk.Frame(self.frame, bg=C_IDLE)
+        ctrl.pack()
+
+        tk.Label(ctrl, text="lead", bg=C_IDLE, fg=DIM, font=small, anchor="e"
+                 ).grid(row=0, column=0, sticky="e", padx=(0, 10))
+        lgrp = tk.Frame(ctrl, bg=C_IDLE)
+        lgrp.grid(row=0, column=1, sticky="w")
+        RoundButton(lgrp, "−", lambda: self.bump_lead(-0.010), "normal",
                     w=36, h=36, r=11, font=self._btn_font, app=self
-                    ).pack(side="left", padx=(8, 4))
+                    ).pack(side="left", padx=(0, 4))
         self.lead_var = tk.StringVar(value="500")
-        self.lead_entry = RoundEntry(lrow, self.lead_var, w=66, h=36, r=11,
+        self.lead_entry = RoundEntry(lgrp, self.lead_var, w=66, h=36, r=11,
                                      font=val, app=self)
         self.lead_entry.pack(side="left")
         self.lead_entry.entry.bind("<Return>", lambda e: self._commit_lead())
         self.lead_entry.entry.bind("<FocusOut>", lambda e: self._commit_lead())
-        RoundButton(lrow, "+", lambda: self.bump_lead(0.010), "normal",
+        RoundButton(lgrp, "+", lambda: self.bump_lead(0.010), "normal",
                     w=36, h=36, r=11, font=self._btn_font, app=self
                     ).pack(side="left", padx=(4, 8))
-        self.lead_hint = tk.Label(lrow, text="ms early", bg=C_IDLE, fg=DIM,
+        self.lead_hint = tk.Label(lgrp, text="ms early", bg=C_IDLE, fg=DIM,
                                   font=small, width=7, anchor="w")
         self.lead_hint.pack(side="left")
 
-        # output mode row
-        mrow = tk.Frame(self.frame, bg=C_IDLE)
-        mrow.pack(pady=(12, 0))
-        tk.Label(mrow, text="mode", bg=C_IDLE, fg=DIM,
-                 font=small, width=7, anchor="e").pack(side="left")
-        self.mode_menu = RoundMenu(mrow, self.mode_var, MODES, w=214, h=36,
+        tk.Label(ctrl, text="mode", bg=C_IDLE, fg=DIM, font=small, anchor="e"
+                 ).grid(row=1, column=0, sticky="e", padx=(0, 10), pady=(12, 0))
+        self.mode_menu = RoundMenu(ctrl, self.mode_var, MODES, w=214, h=36,
                                    r=11, font=mid, app=self)
-        self.mode_menu.pack(side="left", padx=(8, 0))
+        self.mode_menu.grid(row=1, column=1, sticky="w", pady=(12, 0))
 
-        # buttons
+        # transport buttons -- all three the same size (BTN_W x BTN_H); centered
         brow = tk.Frame(self.frame, bg=C_IDLE)
-        brow.pack(pady=(18, 0))
+        brow.pack(pady=(16, 0))
         self.load_btn = RoundButton(brow, "Load SRT", self.load, "normal",
+                                    w=BTN_W, h=BTN_H, r=BTN_R,
                                     font=self._btn_font, app=self)
         self.load_btn.pack(side="left", padx=5)
         self.go_btn = RoundButton(brow, "GO", self.go, "primary",
+                                  w=BTN_W, h=BTN_H, r=BTN_R,
                                   font=self._btn_font, app=self)
         self.go_btn.pack(side="left", padx=5)
         self.stop_btn = RoundButton(brow, "Stop", self.stop, "warn",
+                                    w=BTN_W, h=BTN_H, r=BTN_R,
                                     font=self._btn_font, app=self)
         self.stop_btn.pack(side="left", padx=5)
         self._set_go_enabled(False)
         self._set_stop_enabled(False)
 
-        # footer hint
+        # footer hint + copyright, pinned to the bottom (copyright lowest)
+        self.copyright = tk.Label(self.frame, text="© 2026 RelentlessOldMan",
+                                  bg=C_IDLE, fg=DIM, font=small)
+        self.copyright.pack(side="bottom", pady=(0, 4))
         self.footer = tk.Label(
             self.frame, text="Esc  stop + release      ↑ / ↓  nudge lead",
             bg=C_IDLE, fg=DIM, font=small)
-        self.footer.pack(side="bottom", pady=(14, 0))
+        self.footer.pack(side="bottom", pady=(12, 4))
 
         root.bind("<Escape>", lambda e: self.stop())
         root.bind("<Up>", lambda e: self.bump_lead(0.010))
@@ -493,31 +582,57 @@ class App:
 
     # ---------------------------------------------------------------- helpers
     def _set_color(self, color):
-        # only repaint when the color actually changes -- avoids per-tick flicker
+        # "color" is the run state: C_IDLE (no outline), C_ARMED (rose) or
+        # C_PLAY (teal). Repaint only on change to avoid per-tick redraws.
         if color != self._painted:
             self._painted = color
-            self.paint(color)
+            self._border_color = None if color == C_IDLE else color
+            self._draw_border(self._border_color)
 
-    def paint(self, color):
-        # recolor the backdrop + all text labels/frames, and the corner backdrop
-        # of the rounded controls so their rounding blends into the fill.
-        self.root.configure(bg=color)
-        self.frame.configure(bg=color)
-        for w in self.frame.winfo_children():
-            if w is self.sep:
-                continue
-            if isinstance(w, tk.Label):
-                w.configure(bg=color)
-            elif isinstance(w, tk.Frame):
-                w.configure(bg=color)
-                for gc in w.winfo_children():
-                    if isinstance(gc, tk.Label):
-                        gc.configure(bg=color)
-        for cv in self._transparent:
-            cv.configure(bg=color)
+    def _draw_border(self, color):
+        cv = self.border
+        cv.delete("stateborder")
+        if not color:
+            return
+        w = cv.winfo_width() or WIN_W
+        h = cv.winfo_height() or WIN_H
+        _round_rect(cv, BORDER_INSET, BORDER_INSET, w - BORDER_INSET,
+                    h - BORDER_INSET, BORDER_R, outline=color, width=BORDER_W,
+                    fill="", tags="stateborder")
+
+    def _on_resize(self, e):
+        # keep the UI inset from the edges, then redraw the outline to fit
+        self.border.itemconfigure(self._frame_win, width=e.width - 2 * FRAME_PAD_X,
+                                  height=e.height - 2 * FRAME_PAD_Y)
+        self._draw_border(self._border_color)
 
     def _type_mode(self):
         return self.mode_var.get() == MODE_TYPE
+
+    def _fit_lyric(self, text):
+        # Pre-wrap to LYRIC_LINES lines at LYRIC_WRAP px so the fixed-height label
+        # never overflows; truncate the last line with an ellipsis if it can't fit.
+        if not text:
+            return ""
+        f, W = self._lyric_font, LYRIC_WRAP
+        lines, cur = [], ""
+        for word in text.split():
+            trial = word if not cur else cur + " " + word
+            if f.measure(trial) <= W or not cur:
+                cur = trial
+            else:
+                lines.append(cur)
+                cur = word
+        if cur:
+            lines.append(cur)
+        if len(lines) <= LYRIC_LINES:
+            return "\n".join(lines)
+        head = lines[:LYRIC_LINES - 1]
+        tail = " ".join(lines[LYRIC_LINES - 1:])
+        while tail and f.measure(tail + "…") > W:
+            tail = tail.rsplit(" ", 1)[0] if " " in tail else tail[:-1]
+        head.append((tail + "…") if tail else "…")
+        return "\n".join(head)
 
     def bump_lead(self, d):
         if self.state != "idle":
@@ -560,8 +675,10 @@ class App:
         self.events = build_events(subs)
         name = path.replace("\\", "/").rsplit("/", 1)[-1]
         self.file_lbl.configure(text=f"{name}  ({len(subs)} lines)")
-        self.status.configure(text="ready — press GO, then click Play on cue")
+        self.status.configure(text="ready — press GO, then click Play on cue",
+                              fg=DIM)
         self.clock.configure(text="--.--", fg=DIM)
+        self.lyric.configure(text="")
         self._set_go_enabled(True)
 
     # ------------------------------------------------------------------- run
@@ -589,9 +706,10 @@ class App:
         # t0 is the projected "click play" instant; elapsed runs -offset -> 0 -> dur
         self.t0 = time.perf_counter() + self.offset
         self._set_color(C_ARMED)
-        self.clock.configure(fg=TXT)   # live digits pop white on the red/green fill
-        self.status.configure(text="GET READY…")
-        self.lyric.configure(text="")
+        # live text goes white while the rose/teal outline signals the state
+        self.clock.configure(fg=TXT)
+        self.status.configure(fg=TXT)
+        self.lyric.configure(fg=TXT, text="")
         self._tick()
 
     def _tick(self):
@@ -620,7 +738,7 @@ class App:
                 if s <= elapsed < e:
                     cur = txt
                     break
-            self.lyric.configure(text=cur)
+            self.lyric.configure(text=self._fit_lyric(cur))
             if elapsed < 0.6:
                 self.status.configure(text="▶  CLICK PLAY NOW")
             elif self.space_down:
@@ -682,7 +800,7 @@ class App:
         self.state = "idle"
         self._type_q.clear()
         self._pumping = False
-        self.status.configure(text="stopped")
+        self.status.configure(text="stopped", fg=DIM)
         self.clock.configure(text="--.--", fg=DIM)
         self.lyric.configure(text="")
         self._set_color(C_IDLE)
@@ -703,23 +821,33 @@ class App:
     def _pose(self, variant="ready"):
         """Render a real UI state with sample content, for a docs screenshot.
 
-        variant "ready" = the dark resting state right after loading an .srt;
-        variant "run"   = the green running state with the spacebar held.
-        Both mirror what the app actually shows -- no fabricated states.
+        "ready" = dark resting state after loading; "run" = teal running state
+        with the space held; "armed" = rose count-in. All mirror what the app
+        actually shows -- no fabricated states.
         """
-        self.file_lbl.configure(text="Indispensable.srt  (32 lines)")
-        if variant == "run":
+        self.file_lbl.configure(text="You Were Always Enough.srt  (41 lines)")
+        if variant in ("run", "armed"):
             self.state = "running"
             self._set_go_enabled(False)
             self.load_btn.set_enabled(False)
             self.mode_menu.set_enabled(False)
             self.lead_entry.set_state("disabled")
             self._set_stop_enabled(True)
-            self.clock.configure(text="34.62", fg=TXT)
-            self.status.configure(text="●  SPACE HELD", fg=TXT)
-            self.lyric.configure(text="you were the one thing I couldn't replace",
-                                 fg=TXT)
+            self.clock.configure(fg=TXT)
+            self.status.configure(fg=TXT)
+            self.lyric.configure(fg=TXT)
+        if variant == "run":
+            self.clock.configure(text="34.62")
+            self.status.configure(text="●  SPACE HELD")
+            self.lyric.configure(text=self._fit_lyric(
+                "You were loved for just being, for the small "
+                "and simple fact of where you stand"))
             self._set_color(C_PLAY)
+        elif variant == "armed":
+            self.clock.configure(text="-1.30")
+            self.status.configure(text="GET READY — hit PLAY at 0")
+            self.lyric.configure(text="")
+            self._set_color(C_ARMED)
         else:
             self.clock.configure(text="--.--", fg=DIM)
             self.status.configure(text="ready — press GO, then click Play on cue",
@@ -735,9 +863,9 @@ def main():
     if "--demo" in args:
         i = args.index("--demo")
         pose = "ready"
-        if i + 1 < len(args) and args[i + 1] in ("ready", "run"):
+        if i + 1 < len(args) and args[i + 1] in ("ready", "run", "armed"):
             pose = args[i + 1]
-        args = [a for a in args if a not in ("--demo", "ready", "run")]
+        args = [a for a in args if a not in ("--demo", "ready", "run", "armed")]
     if args and args[0].lower().endswith(".srt"):
         srt = args[0]
     root = tk.Tk()

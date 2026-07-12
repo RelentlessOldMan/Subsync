@@ -38,9 +38,13 @@ Keys land on whatever window has keyboard focus, so after GO, click into the son
 the keys go there, not to Subsync.
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Subsync loaded and ready" width="360">
+  <img src="docs/screenshot-countin.png" alt="Subsync count-in" width="300">
+  &nbsp;
+  <img src="docs/screenshot.png" alt="Subsync loaded and ready" width="300">
   <br>
-  <em>Loaded and armed — press GO, then click Play on the cue.</em>
+  <em>The window stays on your dark theme; a rounded outline lights up only while it's
+  running — <strong>rose</strong> during the 3 s count-in, <strong>teal</strong> while it plays
+  (top), and nothing at rest (right).</em>
 </p>
 
 ## Requirements
@@ -94,6 +98,8 @@ in the file, it's baked into the timing. That's an `.srt` data issue, not an app
 Subsync/
   subsync.py           the whole thing — key injection + srt parser + UI, one file, stdlib only
   Subsync.cmd          double-click to run it windowless (Windows); drag an .srt on to pre-load
+  subsync.ico          window + taskbar icon
+  make_icon.py         regenerates subsync.ico (pure stdlib, no PIL)
   release.ps1          one-shot: bump version, tag, cut a GitHub release with subsync.py attached
   docs/                hero images (posed --demo renders)
   README.md  LICENSE  .gitignore
