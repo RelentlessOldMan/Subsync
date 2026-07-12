@@ -14,3 +14,6 @@ Thumbs.db
 # Local dev / handoff notes — kept out of the public repo
 CLAUDE.md
 .claude/
+
+# Release bundle built by release.ps1 (uploaded as an asset, not tracked)
+Subsync.zip
