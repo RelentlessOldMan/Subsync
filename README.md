@@ -9,8 +9,8 @@ install`, no build step. Windows only (uses the Win32 `SendInput` API).
 
 ![Subsync driving a song](docs/screenshot-running.png)
 
-Sibling to [Subtap](../Subtap): Subtap *edits* subtitle timings by ear; **Subsync plays that
-timing back** into whatever app has keyboard focus. Same family, same colors.
+Sibling to [Subtap](https://github.com/RelentlessOldMan/Subtap): Subtap *edits* subtitle timings by
+ear; **Subsync plays that timing back** into whatever app has keyboard focus. Same family, same colors.
 
 ## Why
 
@@ -90,7 +90,7 @@ posed with sample content (add `run` for the green playing state).
 Some `.srt`s pad a caption's **end** time out to the next line's start, so a line "shows" straight
 through a long instrumental. Subsync faithfully holds space that whole time — the pause isn't a gap
 in the file, it's baked into the timing. That's an `.srt` data issue, not an app bug: fix it in
-[Subtap](../Subtap) by trimming the line's end to where the vocal actually stops.
+[Subtap](https://github.com/RelentlessOldMan/Subtap) by trimming the line's end to where the vocal actually stops.
 
 ## Layout
 
