@@ -29,13 +29,16 @@ if ($Version) {
     $ver = "{0}.{1}.{2}" -f $Matches[1], $Matches[2], ([int]$Matches[3] + 1)
 }
 
-# 3. Write the version back (UTF-8, no BOM) and commit ONLY if it actually changed --
-#    so re-releasing the current version (e.g. the first v1.0.0) doesn't fail on an empty commit.
+# 3. Stamp the version AND the build timestamp into subsync.py (UTF-8, no BOM) so a
+#    downloaded copy -- which has no .git to derive them from -- still shows both. The
+#    fresh timestamp always changes the file, so the release commit is never empty.
+$stamp = (Get-Date).ToString("yyyy-MM-dd HH:mm")
 $py = [regex]::Replace($py, '__version__\s*=\s*"\d+\.\d+\.\d+"', "__version__ = `"$ver`"")
+$py = [regex]::Replace($py, '__build__\s*=\s*"[^"]*"', "__build__ = `"$stamp`"")
 [System.IO.File]::WriteAllText("$PSScriptRoot\subsync.py", $py)
 if (git status --porcelain -- subsync.py) {
     git add subsync.py
-    git commit --quiet -m "Release v$ver"
+    git commit --quiet -m "Release v$ver ($stamp)"
     git push --quiet origin main
 }
 
@@ -43,22 +46,29 @@ if (git status --porcelain -- subsync.py) {
 git tag "v$ver"
 git push --quiet origin "v$ver"
 
-# 5. Bundle the double-click experience (launcher + icon) alongside the one file.
+# 5. Freeze the standalone .exe (no Python needed on the target). build.ps1 stats the
+#    exe's own mtime for its build timestamp, so it's stamped correctly by this run.
+powershell -ExecutionPolicy Bypass -File "$PSScriptRoot\build.ps1"
+$exe = "$PSScriptRoot\dist\Subsync.exe"
+if (-not (Test-Path $exe)) { throw "build.ps1 did not produce dist\Subsync.exe" }
+
+# 6. Bundle the double-click experience (launcher + icon) alongside the one file.
 $zip = "$PSScriptRoot\Subsync.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path subsync.py, Subsync.cmd, subsync.ico, README.md, LICENSE -DestinationPath $zip
 
-# 6. Create the GitHub release with both assets.
+# 7. Create the GitHub release with all three assets (exe / zip / one file).
 $notes = @"
 **Subsync v$ver** - a single-file, dependency-free ``.srt`` -> keystroke player that drives a lagging synced-lyric display back into time by hand.
 
-### Run it (Windows, needs Python 3.8+)
-- **Easiest:** download **Subsync.zip** below, extract it, and double-click **Subsync.cmd**.
+### Run it (Windows)
+- **Easiest (no Python):** download **Subsync.exe** below and double-click it.
+- **Double-click the script:** download **Subsync.zip**, extract, and run **Subsync.cmd** (needs Python 3.8+).
 - **One file:** download **subsync.py** and run  ``python subsync.py``  (then Load SRT, or drag an ``.srt`` on).
 
 Full how-to + screenshots: https://github.com/RelentlessOldMan/Subsync#readme
 "@
-gh release create "v$ver" subsync.py $zip --title "Subsync v$ver" --notes $notes
+gh release create "v$ver" $exe subsync.py $zip --title "Subsync v$ver" --notes $notes
 
 Remove-Item $zip -Force   # asset is uploaded; don't leave it in the working tree
 Write-Host "`nReleased v$ver -> https://github.com/RelentlessOldMan/Subsync/releases/tag/v$ver"

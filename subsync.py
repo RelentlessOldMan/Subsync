@@ -25,15 +25,77 @@ Windows only (uses SendInput). Pure stdlib -- runs on your global Python.
 """
 
 __version__ = "1.0.0"
+__build__ = ""   # stamped "YYYY-MM-DD HH:MM" by release.ps1 at build time; blank when
+                 # running from source (the timestamp is derived from git/mtime instead).
 
 import os
 import sys
 import time
 import ctypes
+import subprocess
+from datetime import datetime
+from pathlib import Path
 from collections import deque
 from ctypes import wintypes
 import tkinter as tk
 from tkinter import filedialog, font as tkfont
+
+# ------------------------------------------------------------- version / build
+# The displayed version auto-bumps without a build step: the "build" number is the
+# git commit count and the "build timestamp" is the HEAD commit's date, both read
+# live at startup (mirrors Subtap). release.ps1 also bakes __build__ into the
+# shipped file so a downloaded copy -- which has no .git -- still shows when it
+# was cut.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # no console flash under pythonw
+
+
+def _git(*args):
+    """Run git in this script's folder, quietly; '' on any failure / off-repo."""
+    try:
+        repo = str(Path(__file__).resolve().parent)
+        r = subprocess.run(["git", "-C", repo, *args], capture_output=True,
+                           text=True, timeout=3, creationflags=_NO_WINDOW)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _mtime_stamp():
+    """Last-modified time of the running program as 'YYYY-MM-DD HH:MM'. Uses the
+    .exe itself when frozen (its build time -- the source .py isn't a real file
+    inside a onefile bundle), else this source file. '' if unavailable."""
+    try:
+        target = sys.executable if getattr(sys, "frozen", False) else __file__
+        mt = Path(target).resolve().stat().st_mtime
+        return datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return ""
+
+
+def _version_string():
+    """'v{semantic} · build {N} · {hash}{*}' -- N is the commit count so the
+    version bumps on every commit; '*' marks a dirty tree. Just 'v{semantic}'
+    when off-repo."""
+    base = f"v{__version__}"
+    n = _git("rev-list", "--count", "HEAD")
+    h = _git("rev-parse", "--short", "HEAD")
+    if n and h:
+        dirty = "*" if _git("status", "--porcelain") else ""
+        return f"{base} · build {n} · {h}{dirty}"
+    return base
+
+
+def _build_stamp():
+    """Build time as 'YYYY-MM-DD HH:MM': the HEAD commit's date when the tree is
+    clean, this file's mtime while you have uncommitted edits, and the baked-in
+    __build__ for a downloaded (no-git) copy."""
+    if _git("rev-parse", "--is-inside-work-tree") == "true":
+        if _git("status", "--porcelain"):
+            return _mtime_stamp()            # uncommitted edits -> when you saved
+        stamp = _git("show", "-s", "--format=%cd",
+                     "--date=format:%Y-%m-%d %H:%M", "HEAD")
+        return stamp or _mtime_stamp()
+    return __build__ or _mtime_stamp()
 
 # ---------------------------------------------------------------- key sending
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -143,16 +205,33 @@ def parse_srt(path):
     return out
 
 
-def build_events(subs, merge_gap=0.02):
-    """Merge touching/overlapping lines, then emit (time, 'down'/'up')."""
-    merged = []
-    for s, e, _ in subs:
-        if merged and s <= merged[-1][1] + merge_gap:
-            merged[-1][1] = max(merged[-1][1], e)
-        else:
-            merged.append([s, e])
+# Minimum guaranteed release between two lines' holds, in seconds. Lines never
+# merge -- each one gets its OWN space down/up. When lines touch or overlap (a
+# gap smaller than this), we carve a real release out of the boundary instead of
+# collapsing them, so the space always lifts and re-presses between lines.
+MIN_GAP = 0.06
+
+
+def build_events(subs, min_gap=MIN_GAP):
+    """Emit (time, 'down'/'up') for each line as its OWN hold -- never merge.
+
+    Every line keeps a distinct down/up pair. When two consecutive lines are
+    closer than `min_gap` (touching, or overlapping), the shortfall is split
+    evenly across the boundary: the earlier line's end is pulled in and the
+    later line's start is pushed out by the same amount, guaranteeing a real
+    release-and-re-hold between them. A line is never trimmed past inverting
+    (down always stays before up)."""
+    spans = [[s, e] for s, e, _ in subs]   # already sorted by start
+    for i in range(1, len(spans)):
+        prev_end = spans[i - 1][1]
+        this_start = spans[i][0]
+        gap = this_start - prev_end
+        if gap < min_gap:
+            trim = (min_gap - gap) / 2.0
+            spans[i - 1][1] = max(spans[i - 1][0], prev_end - trim)   # both sides:
+            spans[i][0] = min(spans[i][1], this_start + trim)         # end in, start out
     ev = []
-    for s, e in merged:
+    for s, e in spans:
         ev.append((s, "down"))
         ev.append((e, "up"))
     ev.sort(key=lambda x: (x[0], x[1] == "down"))  # 'up' before 'down' at ties
@@ -392,7 +471,10 @@ def _set_app_icon(root):
     the .ico (and handles its PNG frames), so no blurry upscale. Regenerate the
     icon with `python make_icon.py`.
     """
-    ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "subsync.ico")
+    # When frozen by PyInstaller the bundled files live under sys._MEIPASS, not
+    # next to __file__; fall back to the script dir when running from source.
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    ico = os.path.join(base, "subsync.ico")
     if not os.path.exists(ico):
         return
     try:
@@ -447,7 +529,7 @@ class App:
         self._pumping = False
         self.srt_path = None
 
-        root.title("Subsync")
+        root.title(f"Subsync {_version_string()}")
         root.configure(bg=C_IDLE)
         _set_app_icon(root)
         root.attributes("-topmost", True)
@@ -480,7 +562,7 @@ class App:
         top.pack(fill="x")
         tk.Label(top, text="〰️  Subsync", bg=C_IDLE, fg=ACCENT,
                  font=brand, anchor="w").pack(side="left")
-        tk.Label(top, text=f"v{__version__}", bg=C_IDLE, fg=DIM,
+        tk.Label(top, text=_version_string(), bg=C_IDLE, fg=DIM,
                  font=small, anchor="e").pack(side="right")
 
         self.file_lbl = tk.Label(self.frame, text="No .srt loaded",
@@ -558,7 +640,11 @@ class App:
         self._set_stop_enabled(False)
 
         # footer hint + copyright, pinned to the bottom (copyright lowest)
-        self.copyright = tk.Label(self.frame, text="© 2026 RelentlessOldMan",
+        _stamp = _build_stamp()
+        _cptext = "© 2026 RelentlessOldMan"
+        if _stamp:
+            _cptext += f"   ·   built {_stamp}"
+        self.copyright = tk.Label(self.frame, text=_cptext,
                                   bg=C_IDLE, fg=DIM, font=small)
         self.copyright.pack(side="bottom", pady=(0, 4))
         self.footer = tk.Label(

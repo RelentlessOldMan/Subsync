@@ -5,6 +5,11 @@ __pycache__/
 .venv/
 venv/
 
+# PyInstaller build output (run build.ps1 to regenerate dist\Subsync.exe)
+build/
+dist/
+*.spec
+
 # Editor / OS
 .vscode/
 .idea/
