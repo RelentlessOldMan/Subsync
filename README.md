@@ -54,6 +54,12 @@ the keys go there, not to Subsync.
 
 ## Usage
 
+**No Python?** Download **`Subsync.exe`** from the
+[latest release](https://github.com/RelentlessOldMan/Subsync/releases/latest) and double-click it —
+it's a self-contained build, nothing to install.
+
+Otherwise, on your own Python 3.8+:
+
 ```sh
 python subsync.py                       # then Load SRT from the UI
 python subsync.py "path/to/song.srt"    # pre-load an .srt
