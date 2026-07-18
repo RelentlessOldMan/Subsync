@@ -24,8 +24,8 @@ Windows only (uses SendInput). Pure stdlib -- runs on your global Python.
     python subsync.py  [optional\path\to.srt]
 """
 
-__version__ = "1.0.0"
-__build__ = ""   # stamped "YYYY-MM-DD HH:MM" by release.ps1 at build time; blank when
+__version__ = "1.0.1"
+__build__ = "2026-07-18 08:35"   # stamped "YYYY-MM-DD HH:MM" by release.ps1 at build time; blank when
                  # running from source (the timestamp is derived from git/mtime instead).
 
 import os
